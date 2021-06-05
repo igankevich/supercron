@@ -2,16 +2,19 @@
   (oop goops)
   (srfi srfi-1)
   (ice-9 format)
-  (ice-9 getopt-long))
+  (ice-9 getopt-long)
+  (sqlite3))
 
 (define ULONG_MAX 18446744073709551615)
 (define %iso-date "%Y-%m-%dT%H:%M:%S%z")
 (define %min-timestamp 0)
 (define %max-timestamp ULONG_MAX)
 (define %default-period 60)
-(define %version "0.1.2")
+(define %version "0.2.0")
 (define %verbose? #f)
 (define %dry-run? #f)
+(define %sqlite-url "supercron.sqlite3")
+(define %connection #f)
 
 (define-class <task> ()
   (name #:init-keyword #:name #:accessor task-name #:init-value #f)
@@ -19,6 +22,7 @@
   (environment #:init-keyword #:environment #:accessor task-environment #:init-value '())
   (uid #:init-keyword #:uid #:accessor task-uid #:init-value #f)
   (gid #:init-keyword #:gid #:accessor task-gid #:init-value #f)
+  (procedure #:init-keyword #:procedure #:accessor task-procedure #:init-value #f)
   (schedule #:init-keyword #:schedule #:accessor task-schedule #:init-value '()))
 
 (define-method (task-name/human (task <task>))
@@ -107,33 +111,65 @@
 
 ;; generate timestamps in the interval
 (define-method (task-timestamps (task <task>) (interval <interval>))
-  (sort!
-    (append-map
-      (lambda (interval-b)
-        (interval-intersection-timestamps interval-b interval))
-      (task-schedule task))
-    (lambda (a b) (< a b))))
+  (define tmp
+    (sort!
+      (append-map
+        (lambda (interval-b)
+          (interval-intersection-timestamps interval-b interval))
+        (task-schedule task))
+      (lambda (a b) (< a b))))
+  tmp)
+
+(define-method (task-active? (task <task>))
+  (define active #f)
+  (let ((statement (sqlite-prepare %connection
+                     "SELECT process_id FROM active_tasks WHERE task_id=?")))
+    (sqlite-bind statement 1 (task-name task))
+    (if (not (null? (sqlite-map (lambda (row) row) statement)))
+      (set! active #t))
+    (sqlite-finalize statement))
+  active)
 
 (define-method (task-launch (task <task>))
-  (define id (primitive-fork))
   (cond
-    ((= id 0)
-     (let ((argv (task-arguments task)))
-       (catch #t
-         (lambda ()
-           (if (task-gid task) (setgid (task-gid task)))
-           (if (task-uid task) (setuid (task-uid task)))
-           (if %dry-run? (exit))
-           (apply execle `(,(car argv) ,(task-environment task) ,@argv)))
-         (lambda (key . parameters)
-           (if (eq? key 'quit) (exit))
-           (message "Failed to execute ~a: ~a\n" argv (cons key parameters))
-           (exit EXIT_FAILURE)))))
+    ((task-procedure task)
+     (catch #t
+       (lambda ()
+         (if %verbose?
+           (message "Launched task ~a\n" task))
+         (let ((result ((task-procedure task))))
+           (if %verbose?
+             (message "Finished task ~a: return value ~a\n" task result))))
+       (lambda (key . parameters)
+         (message "Failed to execute ~a: ~a\n" task (cons key parameters)))))
+    ((task-active? task)
+     (if %verbose?
+       (message "Not launching task ~a, it is already active.\n" task)))
     (else
-      ;; store in the database
-      (if %verbose?
-        (message "Launched process ~a: ~a\n" id (task-arguments task))))
-    ))
+      (let ((id (primitive-fork)))
+        (cond
+          ((= id 0)
+           (let ((argv (task-arguments task)))
+             (catch #t
+               (lambda ()
+                 (if (task-gid task) (setgid (task-gid task)))
+                 (if (task-uid task) (setuid (task-uid task)))
+                 (if %dry-run? (exit))
+                 (apply execle `(,(car argv) ,(task-environment task) ,@argv)))
+               (lambda (key . parameters)
+                 (if (eq? key 'quit) (exit))
+                 (message "Failed to execute ~a: ~a\n" argv (cons key parameters))
+                 (exit EXIT_FAILURE)))))
+          (else
+            (let ((statement (sqlite-prepare %connection
+                               "INSERT INTO active_tasks (process_id,task_id) VALUES (?,?)")))
+              (sqlite-bind statement 1 id)
+              (sqlite-bind statement 2 (task-name task))
+              (sqlite-step statement)
+              (sqlite-finalize statement))
+            (if %verbose?
+              (message "Launched process ~a: ~a\n" id (task-arguments task))))
+          )))))
 
 (define (status->string status)
   (define (field key value)
@@ -160,9 +196,26 @@
   (define status (cdr result))
   (if (not (= id 0))
     (begin
+      (let ((statement (sqlite-prepare %connection
+                         "DELETE FROM active_tasks WHERE process_id=?")))
+        (sqlite-bind statement 1 id)
+        (sqlite-step statement)
+        (sqlite-finalize statement))
       (if %verbose?
         (message "Terminated process ~a: ~a\n" id (status->string status)))
       (check-child-processes))))
+
+(define (store-current-timestamp current-timestamp)
+  (let ((statement (sqlite-prepare %connection
+                     "INSERT INTO timestamps (timestamp) VALUES (?)")))
+    (sqlite-bind statement 1 current-timestamp)
+    (sqlite-step statement)
+    (sqlite-finalize statement))
+  (let ((statement (sqlite-prepare %connection
+                     "DELETE FROM timestamps WHERE timestamp <> ?")))
+    (sqlite-bind statement 1 current-timestamp)
+    (sqlite-step statement)
+    (sqlite-finalize statement)))
 
 (define (launch-new-tasks tasks old-timestamp current-timestamp)
   (define interval
@@ -173,7 +226,10 @@
     (filter
       (lambda (task) (not (null? (task-timestamps task interval))))
       tasks))
-  (for-each task-launch current-tasks))
+  (sqlite-exec %connection "BEGIN TRANSACTION")
+  (for-each task-launch current-tasks)
+  (store-current-timestamp current-timestamp)
+  (sqlite-exec %connection "COMMIT"))
 
 (define (agenda tasks interval max-count)
   (define entries
@@ -208,6 +264,35 @@
              ,@rest)))
   (display msg (current-error-port))
   (force-output (current-error-port)))
+
+(define (database-open)
+  (define conn (sqlite-open %sqlite-url (logior SQLITE_OPEN_CREATE SQLITE_OPEN_READWRITE)))
+  (set! %connection conn)
+  ;; Optimise sqlite performance.
+  ;; See: D. Purohith, J. Mohan, V. Chidambaram "The Dangers and Complexities of SQLite Benchmarking"
+  ;; https://www.cs.utexas.edu/~jaya/pdf/apsys17-sqlite.pdf
+  (sqlite-exec conn "PRAGMA auto_vacuum=INCREMENTAL")
+  (sqlite-exec conn "PRAGMA journal_mode=WAL")
+  (sqlite-exec conn "PRAGMA synchronous=NORMAL")
+  ;; create tables
+  (sqlite-exec conn "CREATE TABLE IF NOT EXISTS active_tasks (process_id INTEGER NOT NULL, task_id TEXT NOT NULL); CREATE TABLE IF NOT EXISTS timestamps (timestamp INTEGER NOT NULL);")
+  ;; remove stale processes
+  (sqlite-exec conn "DELETE FROM active_tasks")
+  ;; run all tasks that should have been run while supercron was inactive
+  (let ((statement (sqlite-prepare conn "SELECT MAX(timestamp) FROM timestamps")))
+    (define old-timestamp (car (sqlite-map (lambda (row) (vector-ref row 0)) statement)))
+    (sqlite-finalize statement)
+    (format #t "restart lost tasks\n")
+    (launch-new-tasks tasks old-timestamp (current-time))
+    (format #t "finished\n")
+    )
+  ;; optimise sqlite
+  (database-optimize)
+  conn)
+
+(define (database-optimize)
+  (sqlite-exec %connection "PRAGMA incremental_vacuum")
+  (sqlite-exec %connection "PRAGMA optimize"))
 
 (define (period str)
   (define s (string-trim-both str))
@@ -271,9 +356,16 @@
     (exit EXIT_SUCCESS)))
 
 (define tasks
-  (append-map
-    (lambda (filename) (load-tasks filename))
-    files))
+  (cons
+    (make <task>
+      #:name "supercron-optimise-database"
+      #:schedule (list (make <interval> #:period (period "24h")))
+      #:procedure database-optimize)
+    (append-map
+      (lambda (filename) (load-tasks filename))
+      files)))
+
+(format #t "tasks ~a\n" tasks)
 
 (if (option-ref options 'schedule #f)
   (let ((from-str (option-ref options 'from #f))
@@ -297,13 +389,17 @@
 (define %period
   (let ((period-str (option-ref options 'period #f)))
     (if period-str (period period-str) %default-period)))
+(database-open)
 (define old-timestamp (current-time))
 (define current-timestamp old-timestamp)
 (while #t
   (sleep %period)
+  (check-child-processes)
   ;; intervals are all closed, so we add 1 second here
   ;; to not repeat the same task twice
   (set! old-timestamp (+ 1 current-timestamp))
   (set! current-timestamp (current-time))
   (launch-new-tasks tasks old-timestamp current-timestamp)
   (check-child-processes))
+
+;; vim:lispwords+=sqlite-prepare
