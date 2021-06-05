@@ -9,8 +9,9 @@
 (define %min-timestamp 0)
 (define %max-timestamp ULONG_MAX)
 (define %default-period 60)
-(define %version "0.1.1")
+(define %version "0.1.2")
 (define %verbose? #f)
+(define %dry-run? #f)
 
 (define-class <task> ()
   (name #:init-keyword #:name #:accessor task-name #:init-value #f)
@@ -24,15 +25,20 @@
   (define name (task-name task))
   (if name name (string-join (task-arguments task) " ")))
 
+(define-method (write (task <task>) port)
+  (format port "~a" (task-name/human task)))
+
 (define-class <interval> ()
   (start #:init-keyword #:start #:accessor interval-start #:init-value %min-timestamp)
   (end #:init-keyword #:end #:accessor interval-end #:init-value %max-timestamp)
   (period #:init-keyword #:period #:accessor interval-period #:init-value 0))
 
 (define-method (write (interval <interval>) port)
+  (define start (interval-start interval))
+  (define end (interval-end interval))
   (format port "[from ~a to ~a period ~a]"
-          (interval-start interval)
-          (interval-end interval)
+          (if (not (= start %min-timestamp)) (timestamp->string start))
+          (if (not (= end %max-timestamp)) (timestamp->string end))
           (interval-period interval)))
 
 (define-method (interval-start-time (interval <interval>))
@@ -42,6 +48,9 @@
 (define-method (interval-end-time (interval <interval>))
   (define t (interval-end interval))
   (if t t %max-timestamp))
+
+(define-method (interval-null? (interval <interval>))
+  (> (interval-start interval) (interval-end interval)))
 
 (define-method (interval-closed? (interval <interval>))
   (and (not (= (interval-start interval) %min-timestamp))
@@ -91,7 +100,7 @@
   (cond
     ((intersect? a b)
      (let ((c (intersection a b)))
-       (if (interval-closed? c)
+       (if (and (not (interval-null? c)) (interval-closed? c))
          (interval-timestamps c)
          '())))
     (else '())))
@@ -114,8 +123,10 @@
          (lambda ()
            (if (task-gid task) (setgid (task-gid task)))
            (if (task-uid task) (setuid (task-uid task)))
+           (if %dry-run? (exit))
            (apply execle `(,(car argv) ,(task-environment task) ,@argv)))
          (lambda (key . parameters)
+           (if (eq? key 'quit) (exit))
            (message "Failed to execute ~a: ~a\n" argv (cons key parameters))
            (exit EXIT_FAILURE)))))
     (else
@@ -179,7 +190,9 @@
     (min max-count (length entries))))
 
 (define (timestamp->string t)
-  (strftime %iso-date (localtime t)))
+  (if (= t %max-timestamp)
+    "+infinity"
+    (strftime %iso-date (localtime t))))
 
 (define (string->timestamp str)
   (let ((tm (car (strptime %iso-date str))))
@@ -225,7 +238,7 @@
 
 (define (usage)
   (define name (car (command-line)))
-  (format #t "usage: ~a [--period duration] [--verbose] filename...\n" name)
+  (format #t "usage: ~a [--period duration] [--verbose] [--dry-run] filename...\n" name)
   (format #t "usage: ~a [--schedule] [--from timestamp] [--to timestamp] [--limit max-entries] filename...\n" name))
 
 (if (= (length (command-line)) 1)
@@ -241,6 +254,7 @@
                  (limit (required? #f) (value #t))
                  (period (required? #f) (value #t))
                  (verbose (single-char #\v) (required? #f) (value #f))
+                 (dry-run (single-char #\n) (required? #f) (value #f))
                  (help (single-char #\h) (required? #f))
                  (version (required? #f)))))
 
@@ -279,6 +293,7 @@
     (exit EXIT_SUCCESS)))
 
 (set! %verbose? (option-ref options 'verbose #f))
+(set! %dry-run? (option-ref options 'dry-run #f))
 (define %period
   (let ((period-str (option-ref options 'period #f)))
     (if period-str (period period-str) %default-period)))
