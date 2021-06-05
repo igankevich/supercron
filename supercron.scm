@@ -10,7 +10,7 @@
 (define %min-timestamp 0)
 (define %max-timestamp ULONG_MAX)
 (define %default-period 60)
-(define %version "0.2.0")
+(define %version "0.2.1")
 (define %verbose? #f)
 (define %dry-run? #f)
 (define %sqlite-url "supercron.sqlite3")
@@ -280,12 +280,15 @@
   (sqlite-exec conn "DELETE FROM active_tasks")
   ;; run all tasks that should have been run while supercron was inactive
   (let ((statement (sqlite-prepare conn "SELECT MAX(timestamp) FROM timestamps")))
-    (define old-timestamp (car (sqlite-map (lambda (row) (vector-ref row 0)) statement)))
+    (define (first-or-false lst) (if (null? lst) #f (car lst)))
+    (define old-timestamp (first-or-false (sqlite-map (lambda (row) (vector-ref row 0)) statement)))
     (sqlite-finalize statement)
-    (format #t "restart lost tasks\n")
-    (launch-new-tasks tasks old-timestamp (current-time))
-    (format #t "finished\n")
-    )
+    (if old-timestamp
+      (begin
+        (format #t "old-timestamp ~a\n" old-timestamp)
+        (format #t "restart lost tasks\n")
+        (launch-new-tasks tasks old-timestamp (current-time))
+        (format #t "finished\n"))))
   ;; optimise sqlite
   (database-optimize)
   conn)

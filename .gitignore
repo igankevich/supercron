@@ -1,3 +1,6 @@
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
 
 # Created by https://www.toptal.com/developers/gitignore/api/vim,linux
 # Edit at https://www.toptal.com/developers/gitignore?templates=vim,linux
