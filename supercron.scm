@@ -10,7 +10,7 @@
 (define %min-timestamp 0)
 (define %max-timestamp ULONG_MAX)
 (define %default-period 60)
-(define %version "0.2.1")
+(define %version "0.2.2")
 (define %verbose? #f)
 (define %dry-run? #f)
 (define %sqlite-url "supercron.sqlite3")
@@ -284,11 +284,7 @@
     (define old-timestamp (first-or-false (sqlite-map (lambda (row) (vector-ref row 0)) statement)))
     (sqlite-finalize statement)
     (if old-timestamp
-      (begin
-        (format #t "old-timestamp ~a\n" old-timestamp)
-        (format #t "restart lost tasks\n")
-        (launch-new-tasks tasks old-timestamp (current-time))
-        (format #t "finished\n"))))
+      (launch-new-tasks tasks old-timestamp (current-time))))
   ;; optimise sqlite
   (database-optimize)
   conn)
@@ -367,8 +363,6 @@
     (append-map
       (lambda (filename) (load-tasks filename))
       files)))
-
-(format #t "tasks ~a\n" tasks)
 
 (if (option-ref options 'schedule #f)
   (let ((from-str (option-ref options 'from #f))
