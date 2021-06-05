@@ -9,7 +9,8 @@
 (define %min-timestamp 0)
 (define %max-timestamp ULONG_MAX)
 (define %default-period 60)
-(define %version "0.1.0")
+(define %version "0.1.1")
+(define %verbose? #f)
 
 (define-class <task> ()
   (name #:init-keyword #:name #:accessor task-name #:init-value #f)
@@ -119,7 +120,8 @@
            (exit EXIT_FAILURE)))))
     (else
       ;; store in the database
-      (message "Launched process ~a: ~a\n" id (task-arguments task)))
+      (if %verbose?
+        (message "Launched process ~a: ~a\n" id (task-arguments task))))
     ))
 
 (define (status->string status)
@@ -147,7 +149,8 @@
   (define status (cdr result))
   (if (not (= id 0))
     (begin
-      (message "Terminated process ~a: ~a\n" id (status->string status))
+      (if %verbose?
+        (message "Terminated process ~a: ~a\n" id (status->string status)))
       (check-child-processes))))
 
 (define (launch-new-tasks tasks old-timestamp current-timestamp)
@@ -221,7 +224,9 @@
   (load filename))
 
 (define (usage)
-  (format #t "usage: ~a [--period duration] [--schedule] [--from timestamp] [--to timestamp] [--limit max-entries] filename...\n" (car (command-line))))
+  (define name (car (command-line)))
+  (format #t "usage: ~a [--period duration] [--verbose] filename...\n" name)
+  (format #t "usage: ~a [--schedule] [--from timestamp] [--to timestamp] [--limit max-entries] filename...\n" name))
 
 (if (= (length (command-line)) 1)
   (begin
@@ -235,6 +240,7 @@
                  (to (required? #f) (value #t))
                  (limit (required? #f) (value #t))
                  (period (required? #f) (value #t))
+                 (verbose (single-char #\v) (required? #f) (value #f))
                  (help (single-char #\h) (required? #f))
                  (version (required? #f)))))
 
@@ -272,13 +278,14 @@
       (agenda tasks (make <interval> #:start from #:end to) limit))
     (exit EXIT_SUCCESS)))
 
-(define period
+(set! %verbose? (option-ref options 'verbose #f))
+(define %period
   (let ((period-str (option-ref options 'period #f)))
     (if period-str (period period-str) %default-period)))
 (define old-timestamp (current-time))
 (define current-timestamp old-timestamp)
 (while #t
-  (sleep period)
+  (sleep %period)
   ;; intervals are all closed, so we add 1 second here
   ;; to not repeat the same task twice
   (set! old-timestamp (+ 1 current-timestamp))
