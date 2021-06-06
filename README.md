@@ -32,7 +32,7 @@ Here is an example of the configuration file called `example.scm`:
                        #:period (period "1s")))
     #:arguments '("/bin/sleep" "10s")))
 ```
-In this file we speicify single task called "sleep" that runs "/bin/sleep" binary
+In this file we specify single task called "sleep" that runs "/bin/sleep" binary
 with argument "10s". This command is launched periodically every second starting
 from "2021-01-01T00:03:00+0300" up to infinity. To run Supercron we write
 `supercron --verbose --period 2s example.scm`. In "verbose" mode Supercron
