@@ -159,7 +159,7 @@
                (lambda (key . parameters)
                  (if (eq? key 'quit) (exit))
                  (message "Failed to execute ~a: ~a\n" argv (cons key parameters))
-                 (exit EXIT_FAILURE)))))
+                 (exit #f)))))
           (else
             (let ((statement (sqlite-prepare %connection
                                "INSERT INTO active_tasks (process_id,task_id) VALUES (?,?)")))
@@ -241,9 +241,7 @@
             (task-timestamps task interval)))
         tasks)
       (lambda (a b) (< (car a) (car b)))))
-  (take
-    entries
-    (min max-count (length entries))))
+  (take entries (min max-count (length entries))))
 
 (define (timestamp->string t)
   (if (= t %max-timestamp)
@@ -323,12 +321,13 @@
 (define (usage)
   (define name (car (command-line)))
   (format #t "usage: ~a [--period duration] [--verbose] [--dry-run] filename...\n" name)
-  (format #t "usage: ~a [--schedule] [--from timestamp] [--to timestamp] [--limit max-entries] filename...\n" name))
+  (format #t "usage: ~a --schedule [--from timestamp] [--to timestamp] [--limit max-entries] filename...\n" name)
+  (format #t "usage: ~a --trigger --task task-name filename...\n" name))
 
 (if (= (length (command-line)) 1)
   (begin
     (usage)
-    (exit EXIT_FAILURE)))
+    (exit #f)))
 
 (define options
   (getopt-long (command-line)
@@ -336,6 +335,8 @@
                  (from (required? #f) (value #t))
                  (to (required? #f) (value #t))
                  (limit (required? #f) (value #t))
+                 (trigger (required? #f) (value #f))
+                 (task (required? #f) (value #t))
                  (period (required? #f) (value #t))
                  (verbose (single-char #\v) (required? #f) (value #f))
                  (dry-run (single-char #\n) (required? #f) (value #f))
@@ -347,12 +348,12 @@
 (if (option-ref options 'help #f)
   (begin
     (usage)
-    (exit EXIT_SUCCESS)))
+    (exit)))
 
 (if (option-ref options 'version #f)
   (begin
     (format #t "~a" %version)
-    (exit EXIT_SUCCESS)))
+    (exit)))
 
 (define tasks
   (cons
@@ -379,14 +380,29 @@
         (define task (cdr pair))
         (format #t "~a ~a\n" (timestamp->string timestamp) (task-name/human task)))
       (agenda tasks (make <interval> #:start from #:end to) limit))
-    (exit EXIT_SUCCESS)))
+    (exit)))
+
+(database-open)
+
+(if (option-ref options 'trigger #f)
+  (let ((opt-task-name (option-ref options 'task "")))
+    (define selected-tasks
+      (filter
+        (lambda (task) (string=? (task-name task) opt-task-name))
+        tasks))
+    (if (null? selected-tasks)
+      (begin
+        (format (current-error-port) "Unable to find task \"~a\".\n" opt-task-name)
+        (exit #f)))
+    (for-each task-launch selected-tasks)
+    (check-child-processes)
+    (exit)))
 
 (set! %verbose? (option-ref options 'verbose #f))
 (set! %dry-run? (option-ref options 'dry-run #f))
 (define %period
   (let ((period-str (option-ref options 'period #f)))
     (if period-str (period period-str) %default-period)))
-(database-open)
 (define old-timestamp (current-time))
 (define current-timestamp old-timestamp)
 (while #t
@@ -397,6 +413,7 @@
   (set! old-timestamp (+ 1 current-timestamp))
   (set! current-timestamp (current-time))
   (launch-new-tasks tasks old-timestamp current-timestamp)
-  (check-child-processes))
+  (check-child-processes)
+  (gc))
 
 ;; vim:lispwords+=sqlite-prepare
