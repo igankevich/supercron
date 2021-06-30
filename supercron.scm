@@ -10,7 +10,7 @@
 (define %min-timestamp 0)
 (define %max-timestamp ULONG_MAX)
 (define %default-period 60)
-(define %version "0.2.2")
+(define %version "0.3.0")
 (define %verbose? #f)
 (define %dry-run? #f)
 (define %sqlite-url "supercron.sqlite3")
