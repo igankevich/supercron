@@ -30,7 +30,8 @@ Here is an example of the configuration file called `example.scm`:
     #:schedule (list (make <interval>
                        #:start (time "2021-01-01T00:03:00+0300")
                        #:period (period "1s")))
-    #:arguments '("/bin/sleep" "10s")))
+    #:arguments '("/bin/sleep" "10s")
+    #:nice 0)) ;; priority adjustment
 ```
 In this file we specify single task called "sleep" that runs "/bin/sleep" binary
 with argument "10s". This command is launched periodically every second starting
